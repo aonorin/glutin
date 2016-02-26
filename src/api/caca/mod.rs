@@ -1,4 +1,4 @@
-#![cfg(any(target_os = "linux", target_os = "freebsd"))]
+#![cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd"))]
 #![allow(unused_variables, dead_code)]
 
 use libc;
@@ -252,7 +252,7 @@ impl GlContext for Window {
     }
 
     #[inline]
-    fn get_proc_address(&self, addr: &str) -> *const libc::c_void {
+    fn get_proc_address(&self, addr: &str) -> *const () {
         self.opengl.get_proc_address(addr)
     }
 

@@ -13,7 +13,7 @@ pub struct Context {
 }
 
 pub fn load(window: &glutin::Window) -> Context {
-    let gl = gl::Gl::load(window);
+    let gl = gl::Gl::load_with(|ptr| window.get_proc_address(ptr) as *const _);
 
     let version = unsafe {
         let data = CStr::from_ptr(gl.GetString(gl::VERSION) as *const _).to_bytes().to_vec();
@@ -24,11 +24,11 @@ pub fn load(window: &glutin::Window) -> Context {
 
     unsafe {
         let vs = gl.CreateShader(gl::VERTEX_SHADER);
-        gl.ShaderSource(vs, 1, [VS_SRC.as_ptr() as *const i8].as_ptr(), ptr::null());
+        gl.ShaderSource(vs, 1, [VS_SRC.as_ptr() as *const _].as_ptr(), ptr::null());
         gl.CompileShader(vs);
 
         let fs = gl.CreateShader(gl::FRAGMENT_SHADER);
-        gl.ShaderSource(fs, 1, [FS_SRC.as_ptr() as *const i8].as_ptr(), ptr::null());
+        gl.ShaderSource(fs, 1, [FS_SRC.as_ptr() as *const _].as_ptr(), ptr::null());
         gl.CompileShader(fs);
 
         let program = gl.CreateProgram();

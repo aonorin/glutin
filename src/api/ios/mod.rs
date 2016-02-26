@@ -177,10 +177,14 @@ impl MonitorId {
     }
 }
 
+#[derive(Default)]
+pub struct PlatformSpecificWindowBuilderAttributes;
 
 impl Window {
 
-    pub fn new(builder: &WindowAttributes, _: &PixelFormatRequirements, _: &GlAttributes<&Window>) -> Result<Window, CreationError> {
+    pub fn new(builder: &WindowAttributes, _: &PixelFormatRequirements, _: &GlAttributes<&Window>,
+               _: &PlatformSpecificWindowBuilderAttributes) -> Result<Window, CreationError>
+    {
         unsafe {
             if setjmp(mem::transmute(&mut jmpbuf)) != 0 {
                 let app: id = msg_send![Class::get("UIApplication").unwrap(), sharedApplication];
@@ -384,12 +388,12 @@ impl GlContext for Window {
         false
     }
 
-    fn get_proc_address(&self, addr: &str) -> *const libc::c_void {
+    fn get_proc_address(&self, addr: &str) -> *const () {
         let addr_c = CString::new(addr).unwrap();
         let path = CString::new("/System/Library/Frameworks/OpenGLES.framework/OpenGLES").unwrap();
         unsafe {
             let lib = dlopen(path.as_ptr(), RTLD_LAZY | RTLD_GLOBAL);
-            dlsym(lib, addr_c.as_ptr())
+            dlsym(lib, addr_c.as_ptr()) as *const _
         }
     }
 

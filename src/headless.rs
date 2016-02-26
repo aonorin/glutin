@@ -8,9 +8,6 @@ use PixelFormat;
 use PixelFormatRequirements;
 use Robustness;
 
-use gl_common;
-use libc;
-
 use platform;
 
 /// Object that allows you to build headless contexts.
@@ -23,6 +20,9 @@ pub struct HeadlessRendererBuilder<'a> {
 
     // Should be made public once it's stabilized.
     pf_reqs: PixelFormatRequirements,
+
+    /// Platform-specific configuration.
+    platform_specific: platform::PlatformSpecificHeadlessBuilderAttributes,
 }
 
 impl<'a> HeadlessRendererBuilder<'a> {
@@ -33,6 +33,7 @@ impl<'a> HeadlessRendererBuilder<'a> {
             dimensions: (width, height),
             pf_reqs: Default::default(),
             opengl: Default::default(),
+            platform_specific: Default::default(),
         }
     }
 
@@ -66,7 +67,8 @@ impl<'a> HeadlessRendererBuilder<'a> {
     ///  out of memory, etc.
     #[inline]
     pub fn build(self) -> Result<HeadlessContext, CreationError> {
-        platform::HeadlessContext::new(self.dimensions, &self.pf_reqs, &self.opengl)
+        platform::HeadlessContext::new(self.dimensions, &self.pf_reqs, &self.opengl,
+                                       &self.platform_specific)
                 .map(|w| HeadlessContext { context: w })
     }
 
@@ -103,8 +105,8 @@ impl HeadlessContext {
     ///
     /// Contrary to `wglGetProcAddress`, all available OpenGL functions return an address.
     #[inline]
-    pub fn get_proc_address(&self, addr: &str) -> *const libc::c_void {
-        self.context.get_proc_address(addr) as *const libc::c_void
+    pub fn get_proc_address(&self, addr: &str) -> *const () {
+        self.context.get_proc_address(addr)
     }
 
     /// Returns the API that is currently provided by this window.
@@ -120,13 +122,6 @@ impl HeadlessContext {
     }
 }
 
-impl gl_common::GlFunctionsSource for HeadlessContext {
-    #[inline]
-    fn get_proc_addr(&self, addr: &str) -> *const libc::c_void {
-        self.get_proc_address(addr)
-    }
-}
-
 impl GlContext for HeadlessContext {
     #[inline]
     unsafe fn make_current(&self) -> Result<(), ContextError> {
@@ -139,7 +134,7 @@ impl GlContext for HeadlessContext {
     }
 
     #[inline]
-    fn get_proc_address(&self, addr: &str) -> *const libc::c_void {
+    fn get_proc_address(&self, addr: &str) -> *const () {
         self.context.get_proc_address(addr)
     }
 

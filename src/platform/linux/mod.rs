@@ -7,19 +7,24 @@ use GlAttributes;
 use GlContext;
 use PixelFormat;
 use PixelFormatRequirements;
-use libc;
 
 use api::osmesa::{self, OsMesaContext};
 
 pub use self::api_dispatch::{Window, WindowProxy, MonitorId, get_available_monitors, get_primary_monitor};
 pub use self::api_dispatch::{WaitEventsIterator, PollEventsIterator};
+pub use self::api_dispatch::PlatformSpecificWindowBuilderAttributes;
 mod api_dispatch;
+
+#[derive(Default)]
+pub struct PlatformSpecificHeadlessBuilderAttributes;
 
 pub struct HeadlessContext(OsMesaContext);
 
 impl HeadlessContext {
     pub fn new(dimensions: (u32, u32), pf_reqs: &PixelFormatRequirements,
-               opengl: &GlAttributes<&HeadlessContext>) -> Result<HeadlessContext, CreationError>
+               opengl: &GlAttributes<&HeadlessContext>,
+               _: &PlatformSpecificHeadlessBuilderAttributes)
+               -> Result<HeadlessContext, CreationError>
     {
         let opengl = opengl.clone().map_sharing(|c| &c.0);
 
@@ -45,7 +50,7 @@ impl GlContext for HeadlessContext {
     }
 
     #[inline]
-    fn get_proc_address(&self, addr: &str) -> *const libc::c_void {
+    fn get_proc_address(&self, addr: &str) -> *const () {
         self.0.get_proc_address(addr)
     }
 

@@ -1,4 +1,4 @@
-#![cfg(any(target_os = "linux", target_os = "freebsd", target_os = "dragonfly"))]
+#![cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd"))]
 
 extern crate osmesa_sys;
 
@@ -89,7 +89,7 @@ impl GlContext for OsMesaContext {
     #[inline]
     unsafe fn make_current(&self) -> Result<(), ContextError> {
         let ret = osmesa_sys::OSMesaMakeCurrent(self.context, self.buffer.as_ptr()
-                                                as *mut libc::c_void, 0x1401, self.width
+                                                as *mut _, 0x1401, self.width
                                                 as libc::c_int, self.height as libc::c_int);
 
         // an error can only happen in case of invalid parameter, which would indicate a bug
@@ -106,7 +106,7 @@ impl GlContext for OsMesaContext {
         unsafe { osmesa_sys::OSMesaGetCurrentContext() == self.context }
     }
 
-    fn get_proc_address(&self, addr: &str) -> *const libc::c_void {
+    fn get_proc_address(&self, addr: &str) -> *const () {
         unsafe {
             let c_str = CString::new(addr.as_bytes().to_vec()).unwrap();
             mem::transmute(osmesa_sys::OSMesaGetProcAddress(mem::transmute(c_str.as_ptr())))

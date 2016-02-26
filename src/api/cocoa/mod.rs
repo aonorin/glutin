@@ -1,7 +1,5 @@
 #![cfg(target_os = "macos")]
 
-pub use self::headless::HeadlessContext;
-
 use {CreationError, Event, MouseCursor, CursorState};
 use CreationError::OsError;
 use libc;
@@ -13,6 +11,7 @@ use GlProfile;
 use GlRequest;
 use PixelFormat;
 use PixelFormatRequirements;
+use ReleaseBehavior;
 use Robustness;
 use WindowAttributes;
 use native_monitor::NativeMonitorId;
@@ -23,8 +22,8 @@ use objc::declare::ClassDecl;
 use cgl::{CGLEnable, kCGLCECrashOnRemovedFunctions, CGLSetParameter, kCGLCPSurfaceOpacity};
 
 use cocoa::base::{id, nil};
-use cocoa::foundation::{NSAutoreleasePool, NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, 
-                        NSString, NSUInteger}; 
+use cocoa::foundation::{NSAutoreleasePool, NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize,
+                        NSString, NSUInteger};
 use cocoa::appkit;
 use cocoa::appkit::*;
 use cocoa::appkit::NSEventSubtype::*;
@@ -33,7 +32,7 @@ use core_foundation::base::TCFType;
 use core_foundation::string::CFString;
 use core_foundation::bundle::{CFBundleGetBundleWithIdentifier, CFBundleGetFunctionPointerForName};
 
-use core_graphics::display::{CGAssociateMouseAndMouseCursorPosition, CGMainDisplayID, CGDisplayPixelsHigh};
+use core_graphics::display::{CGAssociateMouseAndMouseCursorPosition, CGMainDisplayID, CGDisplayPixelsHigh, CGWarpMouseCursorPosition};
 
 use std::ffi::CStr;
 use std::collections::VecDeque;
@@ -49,10 +48,13 @@ use events::MouseButton;
 use events;
 
 pub use self::monitor::{MonitorId, get_available_monitors, get_primary_monitor};
+pub use self::headless::HeadlessContext;
+pub use self::headless::PlatformSpecificHeadlessBuilderAttributes;
 
 mod monitor;
 mod event;
 mod headless;
+mod helpers;
 
 static mut shift_pressed: bool = false;
 static mut ctrl_pressed: bool = false;
@@ -136,7 +138,7 @@ impl WindowDelegate {
                 window_should_close as extern fn(&Object, Sel, id) -> BOOL);
             decl.add_method(sel!(windowDidResize:),
                 window_did_resize as extern fn(&Object, Sel, id));
-            
+
             decl.add_method(sel!(windowDidBecomeKey:),
                 window_did_become_key as extern fn(&Object, Sel, id));
             decl.add_method(sel!(windowDidResignKey:),
@@ -176,6 +178,9 @@ impl Drop for WindowDelegate {
         }
     }
 }
+
+#[derive(Default)]
+pub struct PlatformSpecificWindowBuilderAttributes;
 
 pub struct Window {
     view: IdRef,
@@ -262,11 +267,16 @@ impl<'a> Iterator for WaitEventsIterator<'a> {
 
 impl Window {
     pub fn new(win_attribs: &WindowAttributes, pf_reqs: &PixelFormatRequirements,
-               opengl: &GlAttributes<&Window>) -> Result<Window, CreationError>
+               opengl: &GlAttributes<&Window>, _: &PlatformSpecificWindowBuilderAttributes)
+               -> Result<Window, CreationError>
     {
         if opengl.sharing.is_some() {
             unimplemented!()
         }
+
+        // not implemented
+        assert!(win_attribs.min_dimensions.is_none());
+        assert!(win_attribs.max_dimensions.is_none());
 
         match opengl.robustness {
             Robustness::RobustNoResetNotification | Robustness::RobustLoseContextOnReset => {
@@ -310,9 +320,9 @@ impl Window {
                 let obj = context.CGLContextObj();
 
                 let mut opacity = 0;
-                CGLSetParameter(obj, kCGLCPSurfaceOpacity, &mut opacity);
+                CGLSetParameter(obj as *mut _, kCGLCPSurfaceOpacity, &mut opacity);
             }
-            
+
             app.activateIgnoringOtherApps_(YES);
             if win_attribs.visible {
                 window.makeKeyAndOrderFront_(nil);
@@ -354,7 +364,7 @@ impl Window {
     }
 
     fn create_window(attrs: &WindowAttributes) -> Option<IdRef> {
-        unsafe { 
+        unsafe {
             let screen = match attrs.monitor {
                 Some(ref monitor_id) => {
                     let native_id = match monitor_id.get_native_identifier() {
@@ -366,7 +376,7 @@ impl Window {
                         let count: NSUInteger = msg_send![screens, count];
                         let key = IdRef::new(NSString::alloc(nil).init_str("NSScreenNumber"));
                         let mut matching_screen: Option<id> = None;
-                        for i in (0..count) {
+                        for i in 0..count {
                             let screen = msg_send![screens, objectAtIndex:i as NSUInteger];
                             let device_description = NSScreen::deviceDescription(screen);
                             let value: id = msg_send![device_description, objectForKey:*key];
@@ -392,24 +402,22 @@ impl Window {
                 }
             };
 
-            let masks = match (attrs.decorations, attrs.transparent) {
-                (true, false) =>
-                    // Classic opaque window with titlebar
-                    NSClosableWindowMask as NSUInteger |
-                    NSMiniaturizableWindowMask as NSUInteger |
-                    NSResizableWindowMask as NSUInteger |
-                    NSTitledWindowMask as NSUInteger,
-                (false, false) =>
-                    // Opaque window without a titlebar
-                    NSClosableWindowMask as NSUInteger |
-                    NSMiniaturizableWindowMask as NSUInteger |
-                    NSResizableWindowMask as NSUInteger |
-                    NSTitledWindowMask as NSUInteger |
-                    NSFullSizeContentViewWindowMask as NSUInteger,
-                (_, true) =>
-                    // Fully transparent window.
-                    // No shadow, decorations or borders.
-                    NSBorderlessWindowMask as NSUInteger
+            let masks = if screen.is_some() || attrs.transparent {
+                // Fullscreen or transparent window
+                NSBorderlessWindowMask as NSUInteger
+            } else if attrs.decorations {
+                // Classic opaque window with titlebar
+                NSClosableWindowMask as NSUInteger |
+                NSMiniaturizableWindowMask as NSUInteger |
+                NSResizableWindowMask as NSUInteger |
+                NSTitledWindowMask as NSUInteger
+            } else {
+                // Opaque window without a titlebar
+                NSClosableWindowMask as NSUInteger |
+                NSMiniaturizableWindowMask as NSUInteger |
+                NSResizableWindowMask as NSUInteger |
+                NSTitledWindowMask as NSUInteger |
+                NSFullSizeContentViewWindowMask as NSUInteger
             };
 
             let window = IdRef::new(NSWindow::alloc(nil).initWithContentRect_styleMask_backing_defer_(
@@ -453,68 +461,7 @@ impl Window {
     fn create_context(view: id, pf_reqs: &PixelFormatRequirements, opengl: &GlAttributes<&Window>)
                       -> Result<(IdRef, PixelFormat), CreationError>
     {
-        let profile = match (opengl.version, opengl.version.to_gl_version(), opengl.profile) {
-
-            // Note: we are not using ranges because of a rust bug that should be fixed here:
-            // https://github.com/rust-lang/rust/pull/27050
-
-            (GlRequest::Latest, _, Some(GlProfile::Compatibility)) => NSOpenGLProfileVersionLegacy as u32,
-            (GlRequest::Latest, _, _) => {
-                if NSAppKitVersionNumber.floor() >= NSAppKitVersionNumber10_9 {
-                    NSOpenGLProfileVersion4_1Core as u32
-                } else if NSAppKitVersionNumber.floor() >= NSAppKitVersionNumber10_7 {
-                    NSOpenGLProfileVersion3_2Core as u32
-                } else {
-                    NSOpenGLProfileVersionLegacy as u32
-                }
-            },
-
-            (_, Some((1, _)), _) => NSOpenGLProfileVersionLegacy as u32,
-            (_, Some((2, _)), _) => NSOpenGLProfileVersionLegacy as u32,
-            (_, Some((3, 0)), _) => NSOpenGLProfileVersionLegacy as u32,
-            (_, Some((3, 1)), _) => NSOpenGLProfileVersionLegacy as u32,
-            (_, Some((3, 2)), _) => NSOpenGLProfileVersion3_2Core as u32,
-            (_, Some((3, _)), Some(GlProfile::Compatibility)) => return Err(CreationError::OpenGlVersionNotSupported),
-            (_, Some((3, _)), _) => NSOpenGLProfileVersion4_1Core as u32,
-            (_, Some((4, _)), Some(GlProfile::Compatibility)) => return Err(CreationError::OpenGlVersionNotSupported),
-            (_, Some((4, _)), _) => NSOpenGLProfileVersion4_1Core as u32,
-            _ => return Err(CreationError::OpenGlVersionNotSupported),
-        };
-
-        // NOTE: OS X no longer has the concept of setting individual
-        // color component's bit size. Instead we can only specify the
-        // full color size and hope for the best. Another hiccup is that
-        // `NSOpenGLPFAColorSize` also includes `NSOpenGLPFAAlphaSize`,
-        // so we have to account for that as well.
-        let alpha_depth = pf_reqs.alpha_bits.unwrap_or(8);
-        let color_depth = pf_reqs.color_bits.unwrap_or(24) + alpha_depth;
-
-        let mut attributes = vec![
-            NSOpenGLPFADoubleBuffer as u32,
-            NSOpenGLPFAClosestPolicy as u32,
-            NSOpenGLPFAColorSize as u32, color_depth as u32,
-            NSOpenGLPFAAlphaSize as u32, alpha_depth as u32,
-            NSOpenGLPFADepthSize as u32, pf_reqs.depth_bits.unwrap_or(24) as u32,
-            NSOpenGLPFAStencilSize as u32, pf_reqs.stencil_bits.unwrap_or(8) as u32,
-            NSOpenGLPFAOpenGLProfile as u32, profile,
-        ];
-
-        // A color depth higher than 64 implies we're using either 16-bit
-        // floats or 32-bit floats and OS X requires a flag to be set
-        // accordingly. 
-        if color_depth >= 64 {
-            attributes.push(NSOpenGLPFAColorFloat as u32);
-        }
-
-        pf_reqs.multisampling.map(|samples| {
-            attributes.push(NSOpenGLPFAMultisample as u32);
-            attributes.push(NSOpenGLPFASampleBuffers as u32); attributes.push(1);
-            attributes.push(NSOpenGLPFASamples as u32); attributes.push(samples as u32);
-        });
-
-        // attribute list must be null terminated.
-        attributes.push(0);
-
+        let attributes = try!(helpers::build_nsattributes(pf_reqs, opengl));
         unsafe {
             let pixelformat = IdRef::new(NSOpenGLPixelFormat::alloc(nil).initWithAttributes_(&attributes));
 
@@ -558,7 +505,7 @@ impl Window {
                     let value = if opengl.vsync { 1 } else { 0 };
                     cxt.setValues_forParameter_(&value, NSOpenGLContextParameter::NSOpenGLCPSwapInterval);
 
-                    CGLEnable(cxt.CGLContextObj(), kCGLCECrashOnRemovedFunctions);
+                    CGLEnable(cxt.CGLContextObj() as *mut _, kCGLCECrashOnRemovedFunctions);
 
                     Ok((cxt, pf))
                 } else {
@@ -590,7 +537,7 @@ impl Window {
     pub fn get_position(&self) -> Option<(i32, i32)> {
         unsafe {
             let content_rect = NSWindow::contentRectForFrameRect_(*self.window, NSWindow::frame(*self.window));
-            
+
             // TODO: consider extrapolating the calculations for the y axis to
             // a private method
             Some((content_rect.origin.x as i32, (CGDisplayPixelsHigh(CGMainDisplayID()) as f64 - (content_rect.origin.y + content_rect.size.height)) as i32))
@@ -602,7 +549,7 @@ impl Window {
             let frame = NSWindow::frame(*self.view);
 
             // NOTE: `setFrameOrigin` might not give desirable results when
-            // setting window, as it treats bottom left as origin. 
+            // setting window, as it treats bottom left as origin.
             // `setFrameTopLeftPoint` treats top left as origin (duh), but
             // does not equal the value returned by `get_window_position`
             // (there is a difference by 22 for me on yosemite)
@@ -676,7 +623,7 @@ impl Window {
 
     #[inline]
     pub fn platform_window(&self) -> *mut libc::c_void {
-        unimplemented!()
+        *self.window as *mut libc::c_void
     }
 
     #[inline]
@@ -685,7 +632,7 @@ impl Window {
     }
 
     pub fn set_cursor(&self, cursor: MouseCursor) {
-        let cursor_name = match cursor {                
+        let cursor_name = match cursor {
             MouseCursor::Arrow | MouseCursor::Default => "arrowCursor",
             MouseCursor::Hand => "pointingHandCursor",
             MouseCursor::Grabbing | MouseCursor::Grab => "closedHandCursor",
@@ -751,8 +698,17 @@ impl Window {
     }
 
     #[inline]
-    pub fn set_cursor_position(&self, _x: i32, _y: i32) -> Result<(), ()> {
-        unimplemented!();
+    pub fn set_cursor_position(&self, x: i32, y: i32) -> Result<(), ()> {
+        let (window_x, window_y) = self.get_position().unwrap_or((0, 0));
+        let (cursor_x, cursor_y) = (window_x + x, window_y + y);
+
+        unsafe {
+            // TODO: Check for errors.
+            let _ = CGWarpMouseCursorPosition(CGPoint { x: cursor_x as CGFloat, y: cursor_y as CGFloat });
+            let _ = CGAssociateMouseAndMouseCursorPosition(true);
+        }
+
+        Ok(())
     }
 }
 
@@ -777,7 +733,7 @@ impl GlContext for Window {
         }
     }
 
-    fn get_proc_address(&self, addr: &str) -> *const libc::c_void {
+    fn get_proc_address(&self, addr: &str) -> *const () {
         let symbol_name: CFString = FromStr::from_str(addr).unwrap();
         let framework_name: CFString = FromStr::from_str("com.apple.opengl").unwrap();
         let framework = unsafe {
@@ -885,9 +841,7 @@ unsafe fn NSEventToEvent(window: &Window, nsevent: id) -> Option<Event> {
             let received_c_str = nsevent.characters().UTF8String();
             let received_str = CStr::from_ptr(received_c_str);
             for received_char in from_utf8(received_str.to_bytes()).unwrap().chars() {
-                if received_char.is_ascii() {
-                    events.push_back(ReceivedCharacter(received_char));
-                }
+                events.push_back(ReceivedCharacter(received_char));
             }
 
             let vkey =  event::vkeycode_to_element(NSEvent::keyCode(nsevent));
@@ -929,10 +883,13 @@ unsafe fn NSEventToEvent(window: &Window, nsevent: id) -> Option<Event> {
         },
         NSScrollWheel => {
             use events::MouseScrollDelta::{LineDelta, PixelDelta};
+            let scale_factor = window.hidpi_factor();
             let delta = if nsevent.hasPreciseScrollingDeltas() == YES {
-                PixelDelta(nsevent.scrollingDeltaX() as f32, nsevent.scrollingDeltaY() as f32)
+                PixelDelta(scale_factor * nsevent.scrollingDeltaX() as f32,
+                           scale_factor * nsevent.scrollingDeltaY() as f32)
             } else {
-                LineDelta(nsevent.scrollingDeltaX() as f32, nsevent.scrollingDeltaY() as f32)
+                LineDelta(scale_factor * nsevent.scrollingDeltaX() as f32,
+                          scale_factor * nsevent.scrollingDeltaY() as f32)
             };
             Some(MouseWheel(delta))
         },

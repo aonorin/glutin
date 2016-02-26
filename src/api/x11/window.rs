@@ -8,6 +8,9 @@ use std::cell::Cell;
 use std::sync::atomic::AtomicBool;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::os::raw::c_long;
+use std::thread;
+use std::time::Duration;
 
 use Api;
 use ContextError;
@@ -54,7 +57,7 @@ pub struct XWindow {
     pub context: Context,
     is_fullscreen: bool,
     screen_id: libc::c_int,
-    xf86_desk_mode: *mut ffi::XF86VidModeModeInfo,
+    xf86_desk_mode: Option<ffi::XF86VidModeModeInfo>,
     ic: ffi::XIC,
     im: ffi::XIM,
     colormap: ffi::Colormap,
@@ -87,7 +90,9 @@ impl Drop for XWindow {
             let _lock = GLOBAL_XOPENIM_LOCK.lock().unwrap();
 
             if self.is_fullscreen {
-                (self.display.xf86vmode.XF86VidModeSwitchToMode)(self.display.display, self.screen_id, self.xf86_desk_mode);
+                if let Some(mut xf86_desk_mode) = self.xf86_desk_mode {
+                    (self.display.xf86vmode.XF86VidModeSwitchToMode)(self.display.display, self.screen_id, &mut xf86_desk_mode);
+                }
                 (self.display.xf86vmode.XF86VidModeSetViewPort)(self.display.display, self.screen_id, 0, 0);
             }
 
@@ -123,6 +128,7 @@ impl WindowProxy {
             unsafe {
                 (data.display.xlib.XSendEvent)(data.display.display, data.window, 0, 0, mem::transmute(&mut xev));
                 (data.display.xlib.XFlush)(data.display.display);
+                data.display.check_errors().expect("Failed to call XSendEvent after wakeup");
             }
         }
     }
@@ -191,6 +197,7 @@ impl<'a> Iterator for PollEventsIterator<'a> {
             match xev.get_type() {
                 ffi::MappingNotify => {
                     unsafe { (xlib.XRefreshKeyboardMapping)(mem::transmute(&xev)); }
+                    self.window.x.display.check_errors().expect("Failed to call XRefreshKeyboardMapping");
                 },
 
                 ffi::ClientMessage => {
@@ -275,6 +282,7 @@ impl<'a> Iterator for WaitEventsIterator<'a> {
             // it from the queue
             let mut xev = unsafe { mem::uninitialized() };
             unsafe { (self.window.x.display.xlib.XPeekEvent)(self.window.x.display.display, &mut xev) };
+            self.window.x.display.check_errors().expect("Failed to call XPeekEvent");
 
             // calling poll_events()
             if let Some(ev) = self.window.poll_events().next() {
@@ -304,6 +312,10 @@ impl Window {
     {
         let dimensions = window_attrs.dimensions.unwrap_or((800, 600));
 
+        // not implemented
+        assert!(window_attrs.min_dimensions.is_none());
+        assert!(window_attrs.max_dimensions.is_none());
+
         let screen_id = match window_attrs.monitor {
             Some(PlatformMonitorId::X(MonitorId(_, monitor))) => monitor as i32,
             _ => unsafe { (display.xlib.XDefaultScreen)(display.display) },
@@ -314,39 +326,31 @@ impl Window {
             let mut mode_num: libc::c_int = mem::uninitialized();
             let mut modes: *mut *mut ffi::XF86VidModeModeInfo = mem::uninitialized();
             if (display.xf86vmode.XF86VidModeGetAllModeLines)(display.display, screen_id, &mut mode_num, &mut modes) == 0 {
-                return Err(OsError(format!("Could not query the video modes")));
-            }
-
-            let xf86_desk_mode = *modes.offset(0);
-
-            // FIXME: `XF86VidModeModeInfo` is missing its `hskew` field. Therefore we point to
-            //        `vsyncstart` instead of `vdisplay` as a temporary hack.
-
-            let mode_to_switch_to = if window_attrs.monitor.is_some() {
-                let matching_mode = (0 .. mode_num).map(|i| {
-                    let m: ffi::XF86VidModeModeInfo = ptr::read(*modes.offset(i as isize) as *const _); m
-                }).find(|m| m.hdisplay == dimensions.0 as u16 && m.vsyncstart == dimensions.1 as u16);
-
-                if let Some(matching_mode) = matching_mode {
-                    Some(matching_mode)
-
-                } else {
-                    let m = (0 .. mode_num).map(|i| {
-                        let m: ffi::XF86VidModeModeInfo = ptr::read(*modes.offset(i as isize) as *const _); m
-                    }).find(|m| m.hdisplay >= dimensions.0 as u16 && m.vsyncstart == dimensions.1 as u16);
-
-                    match m {
-                        Some(m) => Some(m),
-                        None => return Err(OsError(format!("Could not find a suitable graphics mode")))
-                    }
-                }
+                (None, None)
             } else {
-                None
-            };
-
-            (display.xlib.XFree)(modes as *mut _);
-
-            (mode_to_switch_to, xf86_desk_mode)
+                let xf86_desk_mode: ffi::XF86VidModeModeInfo = ptr::read(*modes.offset(0));
+                let mode_to_switch_to = if window_attrs.monitor.is_some() {
+                    let matching_mode = (0 .. mode_num).map(|i| {
+                        let m: ffi::XF86VidModeModeInfo = ptr::read(*modes.offset(i as isize) as *const _); m
+                    }).find(|m| m.hdisplay == dimensions.0 as u16 && m.vdisplay == dimensions.1 as u16);
+                    if let Some(matching_mode) = matching_mode {
+                        Some(matching_mode)
+                    } else {
+                        let m = (0 .. mode_num).map(|i| {
+                            let m: ffi::XF86VidModeModeInfo = ptr::read(*modes.offset(i as isize) as *const _); m
+                        }).find(|m| m.hdisplay >= dimensions.0 as u16 && m.vdisplay >= dimensions.1 as u16);
+    
+                        match m {
+                            Some(m) => Some(m),
+                            None => return Err(OsError(format!("Could not find a suitable graphics mode")))
+                        }
+                    }
+                } else {
+                    None
+                };
+                (display.xlib.XFree)(modes as *mut _);
+                (mode_to_switch_to, Some(xf86_desk_mode))
+            }
         };
 
         // start the context building process
@@ -354,14 +358,14 @@ impl Window {
             Glx(::api::glx::ContextPrototype<'a>),
             Egl(::api::egl::ContextPrototype<'a>),
         }
-        let builder_clone_opengl_glx = opengl.clone().map_sharing(|_| unimplemented!());      // FIXME: 
-        let builder_clone_opengl_egl = opengl.clone().map_sharing(|_| unimplemented!());      // FIXME: 
+        let builder_clone_opengl_glx = opengl.clone().map_sharing(|_| unimplemented!());      // FIXME:
+        let builder_clone_opengl_egl = opengl.clone().map_sharing(|_| unimplemented!());      // FIXME:
         let context = match opengl.version {
             GlRequest::Latest | GlRequest::Specific(Api::OpenGl, _) | GlRequest::GlThenGles { .. } => {
                 // GLX should be preferred over EGL, otherwise crashes may occur
                 // on X11 – issue #314
                 if let Some(ref glx) = display.glx {
-                    Prototype::Glx(try!(GlxContext::new(glx.clone(), &display.xlib, pf_reqs, &builder_clone_opengl_glx, display.display)))
+                    Prototype::Glx(try!(GlxContext::new(glx.clone(), &display.xlib, pf_reqs, &builder_clone_opengl_glx, display.display, screen_id)))
                 } else if let Some(ref egl) = display.egl {
                     Prototype::Egl(try!(EglContext::new(egl.clone(), pf_reqs, &builder_clone_opengl_egl, egl::NativeDisplay::X11(Some(display.display as *const _)))))
                 } else {
@@ -391,6 +395,7 @@ impl Window {
                     let mut num_visuals = 0;
                     let vi = (display.xlib.XGetVisualInfo)(display.display, ffi::VisualIDMask,
                                                            &mut template, &mut num_visuals);
+                    display.check_errors().expect("Failed to call XGetVisualInfo");
                     assert!(!vi.is_null());
                     assert!(num_visuals == 1);
 
@@ -403,13 +408,14 @@ impl Window {
 
         // getting the root window
         let root = unsafe { (display.xlib.XDefaultRootWindow)(display.display) };
+        display.check_errors().expect("Failed to get root window");
 
         // creating the color map
         let cmap = unsafe {
             let cmap = (display.xlib.XCreateColormap)(display.display, root,
                                                       visual_infos.visual as *mut _,
                                                       ffi::AllocNone);
-            // TODO: error checking?
+            display.check_errors().expect("Failed to call XCreateColormap");
             cmap
         };
 
@@ -435,22 +441,13 @@ impl Window {
             window_attributes |= ffi::CWBackPixel;
         }
 
-        // switching to fullscreen
-        if let Some(mut mode_to_switch_to) = mode_to_switch_to {
-            window_attributes |= ffi::CWOverrideRedirect;
-            unsafe {
-                (display.xf86vmode.XF86VidModeSwitchToMode)(display.display, screen_id, &mut mode_to_switch_to);
-                (display.xf86vmode.XF86VidModeSetViewPort)(display.display, screen_id, 0, 0);
-                set_win_attr.override_redirect = 1;
-            }
-        }
-
         // finally creating the window
         let window = unsafe {
             let win = (display.xlib.XCreateWindow)(display.display, root, 0, 0, dimensions.0 as libc::c_uint,
                 dimensions.1 as libc::c_uint, 0, visual_infos.depth, ffi::InputOutput as libc::c_uint,
                 visual_infos.visual as *mut _, window_attributes,
                 &mut set_win_attr);
+            display.check_errors().expect("Failed to call XCreateWindow");
             win
         };
 
@@ -460,6 +457,8 @@ impl Window {
                 (display.xlib.XMapRaised)(display.display, window);
                 (display.xlib.XFlush)(display.display);
             }
+
+            display.check_errors().expect("Failed to set window visibility");
         }
 
         // creating window, step 2
@@ -467,11 +466,11 @@ impl Window {
             let mut wm_delete_window = with_c_str("WM_DELETE_WINDOW", |delete_window|
                 (display.xlib.XInternAtom)(display.display, delete_window, 0)
             );
+            display.check_errors().expect("Failed to call XInternAtom");
             (display.xlib.XSetWMProtocols)(display.display, window, &mut wm_delete_window, 1);
-            with_c_str(&*window_attrs.title, |title| {;
-                (display.xlib.XStoreName)(display.display, window, title);
-            });
+            display.check_errors().expect("Failed to call XSetWMProtocols");
             (display.xlib.XFlush)(display.display);
+            display.check_errors().expect("Failed to call XFlush");
 
             wm_delete_window
         };
@@ -502,6 +501,7 @@ impl Window {
                 return Err(OsError(format!("XCreateIC failed")));
             }
             (display.xlib.XSetICFocus)(ic);
+            display.check_errors().expect("Failed to call XSetICFocus");
             ic
         };
 
@@ -521,11 +521,75 @@ impl Window {
                 (*hint).res_name = c_name as *mut libc::c_char;
                 (*hint).res_class = c_name as *mut libc::c_char;
                 (display.xlib.XSetClassHint)(display.display, window, hint);
-                (display.xlib.XFree)(hint as *mut libc::c_void);
+                display.check_errors().expect("Failed to call XSetClassHint");
+                (display.xlib.XFree)(hint as *mut _);
             });
         }
 
         let is_fullscreen = window_attrs.monitor.is_some();
+
+        if is_fullscreen {
+            let state_atom = unsafe {
+                with_c_str("_NET_WM_STATE", |state|
+                    (display.xlib.XInternAtom)(display.display, state, 0)
+                )
+            };
+            display.check_errors().expect("Failed to call XInternAtom");
+            let fullscreen_atom = unsafe {
+                with_c_str("_NET_WM_STATE_FULLSCREEN", |state_fullscreen|
+                    (display.xlib.XInternAtom)(display.display, state_fullscreen, 0)
+                )
+            };
+            display.check_errors().expect("Failed to call XInternAtom");
+
+            let client_message_event = ffi::XClientMessageEvent {
+                type_: ffi::ClientMessage,
+                serial: 0,
+                send_event: 1,            // true because we are sending this through `XSendEvent`
+                display: display.display,
+                window: window,
+                message_type: state_atom, // the _NET_WM_STATE atom is sent to change the state of a window
+                format: 32,               // view `data` as `c_long`s
+                data: {
+                    let mut data = ffi::ClientMessageData::new();
+                    // This first `long` is the action; `1` means add/set following property.
+                    data.set_long(0, 1);
+                    // This second `long` is the property to set (fullscreen)
+                    data.set_long(1, fullscreen_atom as c_long);
+                    data
+                }
+            };
+            let mut x_event = ffi::XEvent::from(client_message_event);
+
+            unsafe {
+                (display.xlib.XSendEvent)(
+                    display.display,
+                    root,
+                    0,
+                    ffi::SubstructureRedirectMask | ffi::SubstructureNotifyMask,
+                    &mut x_event as *mut _
+                );
+                display.check_errors().expect("Failed to call XSendEvent");
+            }
+
+            if let Some(mut mode_to_switch_to) = mode_to_switch_to {
+                unsafe {
+                    (display.xf86vmode.XF86VidModeSwitchToMode)(
+                        display.display,
+                        screen_id,
+                        &mut mode_to_switch_to
+                    );
+                    display.check_errors().expect("Failed to call XF86VidModeSwitchToMode");
+                }
+            }
+            else {
+                println!("[glutin] Unexpected state: `mode` is None creating fullscreen window");
+            }
+            unsafe {
+                (display.xf86vmode.XF86VidModeSetViewPort)(display.display, screen_id, 0, 0);
+                display.check_errors().expect("Failed to call XF86VidModeSetViewPort");
+            }
+        }
 
         // finish creating the OpenGL context
         let context = match context {
@@ -536,6 +600,9 @@ impl Window {
                 Context::Egl(try!(ctxt.finish(window as *const libc::c_void)))
             },
         };
+
+        // creating the OpenGL can produce errors, but since everything is checked we ignore
+        display.ignore_error();
 
         // creating the window object
         let window_proxy_data = WindowProxyData {
@@ -562,24 +629,72 @@ impl Window {
             current_size: Cell::new((0, 0)),
             pending_events: Mutex::new(VecDeque::new()),
             cursor_state: Mutex::new(CursorState::Normal),
-            input_handler: Mutex::new(XInputEventHandler::new(display, window, ic))
+            input_handler: Mutex::new(XInputEventHandler::new(display, window, ic, window_attrs))
         };
+
+        window.set_title(&window_attrs.title);
+
+        if window_attrs.visible {
+            unsafe {
+                let ref x_window: &XWindow = window.x.borrow();
+
+                // XSetInputFocus generates an error if the window is not visible,
+                // therefore we wait until it's the case.
+                loop {
+                    let mut window_attributes = mem::uninitialized();
+                    (display.xlib.XGetWindowAttributes)(display.display, x_window.window, &mut window_attributes);
+                    display.check_errors().expect("Failed to call XGetWindowAttributes");
+
+                    if window_attributes.map_state == ffi::IsViewable {
+                        (display.xlib.XSetInputFocus)(
+                            display.display,
+                            x_window.window,
+                            ffi::RevertToParent,
+                            ffi::CurrentTime
+                        );
+                        display.check_errors().expect("Failed to call XSetInputFocus");
+                        break;
+                    }
+
+                    // Wait about a frame to avoid too-busy waiting
+                    thread::sleep(Duration::from_millis(16));
+                }
+            }
+        }
 
         // returning
         Ok(window)
     }
 
     pub fn set_title(&self, title: &str) {
-        with_c_str(title, |title| unsafe {
-            (self.x.display.xlib.XStoreName)(self.x.display.display, self.x.window, title);
+        let wm_name = unsafe {
+            (self.x.display.xlib.XInternAtom)(self.x.display.display, b"_NET_WM_NAME\0".as_ptr() as *const _, 0)
+        };
+        self.x.display.check_errors().expect("Failed to call XInternAtom");
+
+        let wm_utf8_string = unsafe {
+            (self.x.display.xlib.XInternAtom)(self.x.display.display, b"UTF8_STRING\0".as_ptr() as *const _, 0)
+        };
+        self.x.display.check_errors().expect("Failed to call XInternAtom");
+
+        with_c_str(title, |c_title| unsafe {
+            (self.x.display.xlib.XStoreName)(self.x.display.display, self.x.window, c_title);
+
+            let len = title.as_bytes().len();
+            (self.x.display.xlib.XChangeProperty)(self.x.display.display, self.x.window,
+                                            wm_name, wm_utf8_string, 8, ffi::PropModeReplace,
+                                            c_title as *const u8, len as libc::c_int);
             (self.x.display.xlib.XFlush)(self.x.display.display);
-        })
+        });
+        self.x.display.check_errors().expect("Failed to set window title");
+
     }
 
     pub fn show(&self) {
         unsafe {
             (self.x.display.xlib.XMapRaised)(self.x.display.display, self.x.window);
             (self.x.display.xlib.XFlush)(self.x.display.display);
+            self.x.display.check_errors().expect("Failed to call XMapRaised");
         }
     }
 
@@ -587,6 +702,7 @@ impl Window {
         unsafe {
             (self.x.display.xlib.XUnmapWindow)(self.x.display.display, self.x.window);
             (self.x.display.xlib.XFlush)(self.x.display.display);
+            self.x.display.check_errors().expect("Failed to call XUnmapWindow");
         }
     }
 
@@ -620,6 +736,7 @@ impl Window {
 
     pub fn set_position(&self, x: i32, y: i32) {
         unsafe { (self.x.display.xlib.XMoveWindow)(self.x.display.display, self.x.window, x as libc::c_int, y as libc::c_int); }
+        self.x.display.check_errors().expect("Failed to call XMoveWindow");
     }
 
     #[inline]
@@ -635,6 +752,7 @@ impl Window {
     #[inline]
     pub fn set_inner_size(&self, x: u32, y: u32) {
         unsafe { (self.x.display.xlib.XResizeWindow)(self.x.display.display, self.x.window, x as libc::c_uint, y as libc::c_uint); }
+        self.x.display.check_errors().expect("Failed to call XResizeWindow");
     }
 
     #[inline]
@@ -724,8 +842,10 @@ impl Window {
             };
             let c_string = CString::new(cursor_name.as_bytes().to_vec()).unwrap();
             let xcursor = (self.x.display.xcursor.XcursorLibraryLoadCursor)(self.x.display.display, c_string.as_ptr());
+            self.x.display.check_errors().expect("Failed to call XcursorLibraryLoadCursor");
             (self.x.display.xlib.XDefineCursor)(self.x.display.display, self.x.window, xcursor);
             (self.x.display.xlib.XFlush)(self.x.display.display);
+            self.x.display.check_errors().expect("Failed to call XDefineCursor");
         }
     }
 
@@ -738,6 +858,7 @@ impl Window {
             (Normal, Grab) => {
                 unsafe {
                     (self.x.display.xlib.XUngrabPointer)(self.x.display.display, ffi::CurrentTime);
+                    self.x.display.check_errors().expect("Failed to call XUngrabPointer");
                     *cursor_state = Normal;
                     Ok(())
                 }
@@ -781,9 +902,8 @@ impl Window {
     pub fn set_cursor_position(&self, x: i32, y: i32) -> Result<(), ()> {
         unsafe {
             (self.x.display.xlib.XWarpPointer)(self.x.display.display, 0, self.x.window, 0, 0, 0, 0, x, y);
+            self.x.display.check_errors().map_err(|_| ())
         }
-
-        Ok(())
     }
 }
 
@@ -807,7 +927,7 @@ impl GlContext for Window {
     }
 
     #[inline]
-    fn get_proc_address(&self, addr: &str) -> *const libc::c_void {
+    fn get_proc_address(&self, addr: &str) -> *const () {
         match self.x.context {
             Context::Glx(ref ctxt) => ctxt.get_proc_address(addr),
             Context::Egl(ref ctxt) => ctxt.get_proc_address(addr),

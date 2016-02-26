@@ -18,9 +18,7 @@ use Window;
 use WindowAttributes;
 use native_monitor::NativeMonitorId;
 
-use gl_common;
 use libc;
-
 use platform;
 
 /// Object that allows you to build windows.
@@ -33,6 +31,9 @@ pub struct WindowBuilder<'a> {
 
     // Should be made public once it's stabilized.
     pf_reqs: PixelFormatRequirements,
+
+    /// Platform-specific configuration.
+    platform_specific: platform::PlatformSpecificWindowBuilderAttributes,
 }
 
 impl<'a> WindowBuilder<'a> {
@@ -43,6 +44,7 @@ impl<'a> WindowBuilder<'a> {
             pf_reqs: Default::default(),
             window: Default::default(),
             opengl: Default::default(),
+            platform_specific: Default::default(),
         }
     }
 
@@ -52,6 +54,24 @@ impl<'a> WindowBuilder<'a> {
     #[inline]
     pub fn with_dimensions(mut self, width: u32, height: u32) -> WindowBuilder<'a> {
         self.window.dimensions = Some((width, height));
+        self
+    }
+    
+    /// Sets a minimum dimension size for the window
+    ///
+    /// Width and height are in pixels.
+    #[inline]
+    pub fn with_min_dimensions(mut self, width: u32, height: u32) -> WindowBuilder<'a> {
+        self.window.min_dimensions = Some((width, height));
+        self
+    }
+
+    /// Sets a maximum dimension size for the window
+    ///
+    /// Width and height are in pixels.
+    #[inline]
+    pub fn with_max_dimensions(mut self, width: u32, height: u32) -> WindowBuilder<'a> {
+        self.window.max_dimensions = Some((width, height));
         self
     }
 
@@ -170,7 +190,7 @@ impl<'a> WindowBuilder<'a> {
     /// Sets whether sRGB should be enabled on the window. `None` means "I don't care".
     #[inline]
     pub fn with_srgb(mut self, srgb_enabled: Option<bool>) -> WindowBuilder<'a> {
-        self.pf_reqs.srgb = srgb_enabled;
+        self.pf_reqs.srgb = srgb_enabled.unwrap_or(false);
         self
     }
 
@@ -211,7 +231,7 @@ impl<'a> WindowBuilder<'a> {
         }
 
         // building
-        platform::Window::new(&self.window, &self.pf_reqs, &self.opengl)
+        platform::Window::new(&self.window, &self.pf_reqs, &self.opengl, &self.platform_specific)
                             .map(|w| Window { window: w })
     }
 
@@ -397,8 +417,8 @@ impl Window {
     ///
     /// Contrary to `wglGetProcAddress`, all available OpenGL functions return an address.
     #[inline]
-    pub fn get_proc_address(&self, addr: &str) -> *const libc::c_void {
-        self.window.get_proc_address(addr) as *const libc::c_void
+    pub fn get_proc_address(&self, addr: &str) -> *const () {
+        self.window.get_proc_address(addr)
     }
 
     /// Swaps the buffers in case of double or triple buffering.
@@ -492,13 +512,6 @@ impl Window {
     }
 }
 
-impl gl_common::GlFunctionsSource for Window {
-    #[inline]
-    fn get_proc_addr(&self, addr: &str) -> *const libc::c_void {
-        self.get_proc_address(addr)
-    }
-}
-
 impl GlContext for Window {
     #[inline]
     unsafe fn make_current(&self) -> Result<(), ContextError> {
@@ -511,7 +524,7 @@ impl GlContext for Window {
     }
 
     #[inline]
-    fn get_proc_address(&self, addr: &str) -> *const libc::c_void {
+    fn get_proc_address(&self, addr: &str) -> *const () {
         self.get_proc_address(addr)
     }
 

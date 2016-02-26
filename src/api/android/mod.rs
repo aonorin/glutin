@@ -65,6 +65,11 @@ impl MonitorId {
     }
 }
 
+#[derive(Default)]
+pub struct PlatformSpecificWindowBuilderAttributes;
+#[derive(Default)]
+pub struct PlatformSpecificHeadlessBuilderAttributes;
+
 pub struct PollEventsIterator<'a> {
     window: &'a Window,
 }
@@ -116,9 +121,14 @@ impl<'a> Iterator for WaitEventsIterator<'a> {
 
 impl Window {
     pub fn new(win_attribs: &WindowAttributes, pf_reqs: &PixelFormatRequirements,
-               opengl: &GlAttributes<&Window>) -> Result<Window, CreationError>
+               opengl: &GlAttributes<&Window>, _: &PlatformSpecificWindowBuilderAttributes)
+               -> Result<Window, CreationError>
     {
         use std::{mem, ptr};
+
+        // not implemented
+        assert!(win_attribs.min_dimensions.is_none());
+        assert!(win_attribs.max_dimensions.is_none());
 
         let opengl = opengl.clone().map_sharing(|w| &w.context);
 
@@ -263,7 +273,7 @@ impl GlContext for Window {
     }
 
     #[inline]
-    fn get_proc_address(&self, addr: &str) -> *const libc::c_void {
+    fn get_proc_address(&self, addr: &str) -> *const () {
         self.context.get_proc_address(addr)
     }
 
@@ -298,7 +308,9 @@ pub struct HeadlessContext(EglContext);
 impl HeadlessContext {
     /// See the docs in the crate root file.
     pub fn new(dimensions: (u32, u32), pf_reqs: &PixelFormatRequirements,
-               opengl: &GlAttributes<&HeadlessContext>) -> Result<HeadlessContext, CreationError>
+               opengl: &GlAttributes<&HeadlessContext>,
+               _: &PlatformSpecificHeadlessBuilderAttributes)
+               -> Result<HeadlessContext, CreationError>
     {
         let opengl = opengl.clone().map_sharing(|c| &c.0);
         let context = try!(EglContext::new(egl::ffi::egl::Egl, pf_reqs, &opengl,
@@ -323,7 +335,7 @@ impl GlContext for HeadlessContext {
     }
 
     #[inline]
-    fn get_proc_address(&self, addr: &str) -> *const libc::c_void {
+    fn get_proc_address(&self, addr: &str) -> *const () {
         self.0.get_proc_address(addr)
     }
 
